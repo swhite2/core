@@ -27,6 +27,13 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+require_once('phpseclib/File/X509.php');
+require_once('phpseclib/File/ASN1.php');
+require_once('phpseclib/Math/BigInteger.php');
+require_once('phpseclib/File/ASN1/Element.php');
+require_once('phpseclib/Crypt/RSA.php');
+require_once('phpseclib/Crypt/Hash.php');
+
 $openssl_digest_algs = array("sha1", "sha224", "sha256", "sha384", "sha512");
 
 $openssl_crl_status = array(
@@ -593,15 +600,74 @@ function crl_update(&$crl)
     $crl['serial']++;
     $ca_str_crt = base64_decode($ca['crt']);
     $ca_str_key = base64_decode($ca['prv']);
-    $crl_res = openssl_crl_new($ca_str_crt, $crl['serial'], $crl['lifetime']);
+
+    /* Load in the CA's cert, we need it to sign a new CRL */
+    $ca_cert = new \phpseclib\File\X509();
+    $ca_cert->loadX509($ca_str_crt);
+    /* get the private key to sign the new (updated) CRL */
+    $ca_key = new \phpseclib\Crypt\RSA();
+    $ca_key->loadKey($ca_str_key);
+    $ca_cert->setPrivateKey($ca_key);
+
+    /* Load the CA for later signature validation */
+    $x509_crl = new \phpseclib\File\X509();
+    $x509_crl->loadCA($ca_str_crt);
+
+    /*
+     * create empty CRL. A quirk with phpseclib is that in order to correctly sign
+     * a new CRL, a CA must be loaded using a separate X509 container, which is passed
+     * to signCRL(). However, to validate the resulting signature, the original X509
+     * CRL container must load the same CA using loadCA() with a direct reference
+     * to the CA's public cert.
+     */
+    $x509_crl->loadCRL($x509_crl->saveCRL($x509_crl->signCRL($ca_cert, $x509_crl)));
+
+    /* Now validate the CRL to see if everything went well */
+    if (!$x509_crl->validateSignature(false)) {
+        error_log("Invalid signature on new CRL");
+        return false;
+    }
+
     if (is_array($crl['cert']) && (count($crl['cert']) > 0)) {
         foreach ($crl['cert'] as $cert) {
-            openssl_crl_revoke_cert($crl_res, base64_decode($cert["crt"]), $cert["revoke_time"], $cert["reason"]);
+            /*
+             * load the certificate in an x509 container to get its serial number, we need it to revoke it.
+             * We do this because a serial number isn't accounted for in the config during certificate creation
+             */
+            $x509_cert = new \phpseclib\File\X509();
+            $x509_cert->loadCA($ca_str_crt);
+            $raw_cert = $x509_cert->loadX509(base64_decode($cert['crt']));
+            /* Check its signature */
+            if (!$x509_cert->validateSignature(false)) {
+                error_log('Certificate signature is invalid');
+                continue;
+            }
+            /* Get serial number of cert */
+            $sn = $raw_cert['tbsCertificate']['serialNumber']->toString();
+
+            $x509_crl->setRevokedCertificateExtension($sn, 'id-ce-cRLReasons', 'privilegeWithdrawn'); // XXX
+
+            $revoked = $x509_crl->getRevoked($sn);
+            if (empty($revoked)) {
+                error_log("Certificate wasn't revoked!");
+            } else {
+                error_log('certificate has been revoked on ' . implode('', $revoked['revocationDate']));
+                $reason = $x509_crl->getRevokedCertificateExtension($sn, 'id-ce-cRLReasons');
+                if (!empty($reason)) {
+                    error_log("; reason is $reason");
+                }
+            }
         }
     }
-    openssl_crl_export($crl_res, $crl_text, $ca_str_key);
+
+    $x509_crl->setSerialNumber($crl['serial']);
+    $x509_crl->setEndDate('+' . $crl['lifetime'] . ' days');
+    $new_crl = $x509_crl->signCRL($ca_cert, $x509_crl);
+    $crl_text = $x509_crl->saveCRL($new_crl);
+
+    /* Update the CRL */
     $crl['text'] = base64_encode($crl_text);
-    return $crl_res;
+    return true;
 }
 
 function cert_revoke($cert, &$crl, $reason = OCSP_REVOKED_STATUS_UNSPECIFIED)
