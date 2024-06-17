@@ -42,6 +42,7 @@ class BaseAction:
         self.parameters = action_parameters.get('parameters', None)
         self.message = action_parameters.get('message', None)
         self.description = action_parameters.get('description', '')
+        self.event = action_parameters.get('event', None)
         if action_parameters.get('cache_ttl', '').isdigit():
             self.cache_ttl = int(action_parameters['cache_ttl'])
         else:

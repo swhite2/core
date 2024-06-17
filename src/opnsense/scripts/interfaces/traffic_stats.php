@@ -80,8 +80,9 @@ if (isset($argv[1])) {
 
         $result = map_ifs($intfs, $tmp);
         $prev = $interfaces;
-        echo 'event: message' . PHP_EOL;
-        echo 'data: ' . json_encode($result) . PHP_EOL . PHP_EOL;
+        echo json_encode($result) . PHP_EOL;
+        // echo 'event: message' . PHP_EOL;
+        // echo 'data: ' . json_encode($result) . PHP_EOL . PHP_EOL;
         flush();
         sleep($argv[1] <= 1 ? 1 : $argv[1]);
     }

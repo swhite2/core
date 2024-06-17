@@ -68,7 +68,8 @@ if __name__ == '__main__':
                     'intr': formatted[3],
                     'idle': formatted[4]
                 }
-                print(f"event: message\ndata: {ujson.dumps(result)}\n\n", flush=True)
+                print(ujson.dumps(result) + "\n", flush=True)
+                #print(f"event: message\ndata: {ujson.dumps(result)}\n\n", flush=True)
             else:
                 read_fds.remove(fd)
 
