@@ -24,16 +24,30 @@ class Action(BaseAction):
             syslog_error('[%s] No event type specified' % message_uuid)
             return 'Execute error'
         
-        def cleanup():
-            Action.selector.close()
-            Action.registered_events = set()
-            for _, p in Action.processes.items():
-                p.kill()
+        def cleanup(event = None):
+            if event is None:
+                Action.selector.close()
+                Action.registered_events = set()
+                for _, p in Action.processes.items():
+                    p.kill()
+                    # kill child processes as well
+                    try:
+                        os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+            else:
+                Action.selector.unregister(Action.processes[event].stdout)
+                Action.selector.unregister(Action.processes[event].stderr)
+                Action.processes[event].kill()
                 # kill child processes as well
                 try:
-                    os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+                    os.killpg(os.getpgid(Action.processes[event].pid), signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+                del Action.processes[event]
+                if event in Action.fd_buffers:
+                    del Action.fd_buffers[event]
+                Action.registered_events.remove(event)
         
         def handle_events(key, mask):
             name = key.data.split("_")
@@ -46,8 +60,7 @@ class Action(BaseAction):
                     syslog_error('[%s] Script action stderr returned "%s" (%d)' % (
                         message_uuid, err.strip()[:255], return_code
                     ))
-                Action.selector.unregister(key.fileobj)
-                Action.registered_events.remove(event_name)
+                cleanup(event_name)
                 return
 
             data = key.fileobj.read(1024)
@@ -64,14 +77,12 @@ class Action(BaseAction):
                     del Action.fd_buffers[event_name]
             else:
                 # EOF - child process terminated
-                Action.registered_events.remove(event_name)
-                Action.selector.unregister(key.fileobj)
-                os.close(key.fileobj)
-                if event_name in Action.fd_buffers:
-                    del Action.fd_buffers[event_name]
+                cleanup(event_name)
 
         def spawn_and_register(command, event):
             if (event in Action.registered_events):
+                # close action
+                cleanup(event)
                 return
 
             process = subprocess.Popen(
