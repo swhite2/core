@@ -4,6 +4,8 @@ import subprocess
 import selectors
 import traceback
 import signal
+import tempfile
+import fcntl
 from .. import syslog_error, syslog_info
 from .base import BaseAction
 
@@ -100,31 +102,43 @@ class Action(BaseAction):
             Action.registered_events.add(event)
             Action.processes[event] = process
 
+        tmp_file = os.path.join(tempfile.gettempdir(), 'event_output.lock')
         if len(Action.registered_events) == 0:
-            Action.selector = selectors.DefaultSelector()
-            Action.processes = {}
-            Action.fd_buffers = {}
-            try:
-                spawn_and_register(script_command, self.event)
-                while True:
-                    timeout = True
-                    for key, mask in Action.selector.select(1):
-                        timeout = False
-                        handle_events(key, mask)
-                    if timeout:
-                        try:
-                            connection.getpeername()
-                        except OSError:
-                            syslog_info('[%s] Script action terminated by other end' % message_uuid)
+            # make sure only one event loop is capable of starting
+            with open(tmp_file, 'a+') as temp_file:
+                try:
+                    fcntl.flock(temp_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    Action.selector = selectors.DefaultSelector()
+                    Action.processes = {}
+                    Action.fd_buffers = {}
+                    spawn_and_register(script_command, self.event)
+                    fcntl.flock(temp_file, fcntl.LOCK_UN)
+                    while True:
+                        timeout = True
+                        for key, mask in Action.selector.select(1):
+                            timeout = False
+                            handle_events(key, mask)
+                        if timeout:
+                            try:
+                                connection.getpeername()
+                            except OSError:
+                                syslog_info('[%s] Script action terminated by other end' % message_uuid)
+                                break
+                        if not Action.selector.get_map():
+                            # no events left to monitor
                             break
-                    if not Action.selector.get_map():
-                        # no events left to monitor
-                        break
-            except Exception as script_exception:
-                syslog_error('[%s] Script action failed with %s at %s' % (message_uuid, script_exception, traceback.format_exc()))
-                return 'Execute error'
-            finally:
-                cleanup()
+                except OSError as e:
+                    if e.errno == os.errno.EACCESS or e.errno == os.errno.EAGAIN:
+                        # process is already starting up, wait for the event loop to start and hook in
+                        fcntl.flock(temp_file, fcntl.LOCK_EX)
+                        fcntl.flock(temp_file, fcntl.LOCK_UN)
+                        spawn_and_register(script_command, self.event)
+                        return
+                    raise
+                except Exception as script_exception:
+                    syslog_error('[%s] Script action failed with %s at %s' % (message_uuid, script_exception, traceback.format_exc()))
+                finally:
+                    cleanup()
         else:
             # event loop already running
             spawn_and_register(script_command, self.event)
